@@ -31,11 +31,11 @@ uint64_t Ctz(uint64_t x) {
 
 struct BitVector {
   struct Rank {
-    uint32_t abs_hi;
-    uint8_t abs_lo;
-    uint8_t rels[3];
+    uint32_t abs_hi; // absolute rank high
+    uint8_t abs_lo; // absolute rank low
+    uint8_t rels[3]; // relative ranks of idx=1,2,3 words in the block
 
-    uint64_t abs() const {
+    uint64_t abs() const { // Returns the total number of 1-bits before this rank block
       return ((uint64_t)abs_hi << 8) | abs_lo;
     }
     void set_abs(uint64_t abs) {
@@ -44,36 +44,39 @@ struct BitVector {
     }
   };
 
-  vector<uint64_t> words;
-  vector<Rank> ranks;
+  vector<uint64_t> words; // a vector of 64-bit words
+  vector<Rank> ranks; 
   vector<uint32_t> selects;
   uint64_t n_bits;
 
   BitVector() : words(), ranks(), selects(), n_bits(0) {}
 
   uint64_t get(uint64_t i) const {
+    // get the i-th bit (get the word -> get the bit -> mask (LSB))
     return (words[i / 64] >> (i % 64)) & 1UL;
   }
+
   void set(uint64_t i, uint64_t bit) {
-    if (bit) {
+    if (bit) { // set the i-th bit to 1
       words[i / 64] |= (1UL << (i % 64));
-    } else {
+    } else { // clear the i-th bit (set the i-th bit to 0)
       words[i / 64] &= ~(1UL << (i % 64));
     }
   }
 
-  void add(uint64_t bit) {
-    if (n_bits % 256 == 0) {
-      words.resize((n_bits + 256) / 64);
+  void add(uint64_t bit) { // add a bit to the end of bit vector
+    if (n_bits % 256 == 0) { // if you are writing to a new rank block
+      words.resize((n_bits + 256) / 64); // resize words to the next 256 bits (next 4 words)
     }
-    set(n_bits, bit);
-    ++n_bits;
+    set(n_bits, bit); // set the last bit of the bit vector to bit
+    ++n_bits; // n_bits is the number of bits that acutally write to 
   }
+  
   // build builds indexes for rank and select.
   void build() {
-    uint64_t n_blocks = words.size() / 4;
-    uint64_t n_ones = 0;
-    ranks.resize(n_blocks + 1);
+    uint64_t n_blocks = words.size() / 4;  // only one word at initialization, n_blocks = 0
+    uint64_t n_ones = 0; 
+    ranks.resize(n_blocks + 1); // at least one rank block
     for (uint64_t block_id = 0; block_id < n_blocks; ++block_id) {
       ranks[block_id].set_abs(n_ones);
       for (uint64_t j = 0; j < 4; ++j) {
@@ -118,7 +121,8 @@ struct BitVector {
     n += Popcnt(words[word_id] & ((1UL << bit_id) - 1));
     return n;
   }
-  // select returns the position of the (i+1)-th 1-bit.
+  
+  // select returns the position of the (i+1)-th 1-bit （idx=i).
   uint64_t select(uint64_t i) const {
     const uint64_t block_id = i / 256;
     uint64_t begin = selects[block_id];
@@ -153,7 +157,23 @@ struct BitVector {
       word_id += 3;
       i -= ranks[rank_id].rels[2];
     }
+    
+    #ifdef USE_PDEP_SELECT
     return (word_id * 64) + Ctz(_pdep_u64(1UL << i, words[word_id]));
+    #else
+    // Fallback software version：find position of the (i+1)-th 1-bit in the word
+    uint64_t word = words[word_id];
+    int count = 0;
+    for (int bit = 0; bit < 64; ++bit) {
+      if ((word >> bit) & 1) {
+        if (count == (int)i) {
+          return (word_id * 64) + bit;
+        }
+        ++count;
+      }
+    }
+    return UINT64_MAX; 
+    #endif
   }
 
   uint64_t size() const {
@@ -188,6 +208,7 @@ class TrieImpl {
   void add(const string &key);
   void build();
   int64_t lookup(const string &query) const;
+  std::vector<std::pair<std::string, int64_t>> enumerate_keys() const;
 
   uint64_t n_keys() const {
     return n_keys_;
@@ -217,6 +238,9 @@ TrieImpl::TrieImpl()
 }
 
 void TrieImpl::add(const string &key) {
+  // if (!(key > last_key_)) {
+  //   std::cerr << "Skipped invalid key: " << key << " (last: " << last_key_ << ")\n";
+  // }
   assert(key > last_key_);
   if (key.empty()) {
     levels_[0].outs.set(0, 1);
@@ -329,6 +353,108 @@ int64_t TrieImpl::lookup(const string &query) const {
   return level.offset + level.outs.rank(node_id);
 }
 
+// std::vector<std::pair<std::string, int64_t>> TrieImpl::enumerate_keys() const {
+//   std::vector<std::pair<std::string, int64_t>> results;
+
+//   struct Frame {
+//     int level;
+//     uint64_t node_id;
+//     std::string prefix;
+//   };
+
+//   cout << "TrieImpl::enumerate_keys() called\n";
+
+//   std::vector<Frame> stack;
+//   stack.push_back({0, 0, ""});  // start from root
+
+//   while (!stack.empty()) {
+//     Frame cur = stack.back();
+//     stack.pop_back();
+
+//     if (static_cast<size_t>(cur.level + 1) >= levels_.size()) continue;
+//     const auto& level = levels_[cur.level + 1];
+
+//     uint64_t node_pos;
+//     if (cur.node_id != 0)
+//       node_pos = level.louds.select(cur.node_id - 1) + 1;
+//     else
+//       node_pos = 0;
+
+//     uint64_t end = node_pos;
+//     uint64_t word = level.louds.words[end / 64] >> (end % 64);
+//     if (word == 0) {
+//       end += 64 - (end % 64);
+//       word = level.louds.words[end / 64];
+//       while (word == 0) {
+//         end += 64;
+//         word = level.louds.words[end / 64];
+//       }
+//     }
+//     end += __builtin_ctzll(word);
+//     uint64_t begin = cur.node_id;
+//     end = begin + end - node_pos;
+
+//     for (uint64_t child = begin; child < end; ++child) {
+//       std::string next_prefix = cur.prefix + (char)level.labels[child];
+//       if (level.outs.get(child)) {
+//         int64_t key_id = level.offset + level.outs.rank(child);
+//         results.emplace_back(next_prefix, key_id);
+//       }
+//       stack.push_back({cur.level + 1, child, next_prefix});
+//     }
+//   }
+
+//   cout << "TrieImpl::enumerate_keys() finished\n";
+
+//   std::sort(results.begin(), results.end());
+//   return results;
+// }
+
+std::vector<std::pair<std::string, int64_t>> TrieImpl::enumerate_keys() const {
+  std::vector<std::pair<std::string, int64_t>> results;
+  
+  // Use DFS to traverse the trie and collect all keys
+  std::vector<std::tuple<uint64_t, uint64_t, std::string>> stack;
+  stack.push_back({0, 0, ""}); // (level, node_id, prefix)
+  
+  while (!stack.empty()) {
+    auto [level, node_id, prefix] = stack.back();
+    stack.pop_back();
+    
+    // Check if this node marks the end of a key
+    if (level > 0 && levels_[level].outs.get(node_id)) {
+      int64_t key_id = levels_[level].offset + levels_[level].outs.rank(node_id);
+      results.emplace_back(prefix, key_id);
+    }
+    
+    // Skip if we've reached the max level
+    if (level + 1 >= levels_.size()) continue;
+    
+    const Level& next_level = levels_[level + 1];
+    uint64_t node_pos;
+    if (node_id != 0) {
+      node_pos = next_level.louds.select(node_id - 1) + 1;
+      node_id = node_pos - node_id;
+    } else {
+      node_pos = 0;
+    }
+    
+    // Find all children
+    for (uint64_t pos = node_pos; pos < next_level.louds.n_bits; ++pos) {
+      if (next_level.louds.get(pos)) break;
+      
+      uint64_t child_id = pos - node_pos + node_id;
+      if (child_id < next_level.labels.size()) {
+        char label = next_level.labels[child_id];
+        stack.push_back({level + 1, child_id, prefix + label});
+      }
+    }
+  }
+  
+  std::sort(results.begin(), results.end());
+  return results;
+}
+
 Trie::Trie() : impl_(new TrieImpl) {}
 
 Trie::~Trie() {
@@ -358,5 +484,77 @@ uint64_t Trie::n_nodes() const {
 uint64_t Trie::size() const {
   return impl_->size();
 }
+
+// Trie* Trie::merge_trie(const Trie& t2) {
+//   auto keys1 = this->enumerate_keys();
+//   auto keys2 = t2.enumerate_keys();
+
+//   std::cout << "start merge_trie\n";
+//   std::cout << "Trie 1: #keys = " << keys1.size() << ", #nodes = " << n_nodes() << ", size = " << size() << " bytes\n";
+//   std::cout << "Trie 2: #keys = " << keys2.size() << ", #nodes = " << t2.n_nodes() << ", size = " << t2.size() << " bytes\n";
+
+//   vector<string> merged_keys;
+//   // for (const auto& key : keys1) {
+//   //   merged_keys.push_back(key.first);
+//   // }
+//   // for (const auto& key : keys2) {
+//   //   merged_keys.push_back(key.first);
+//   // }
+//   for (auto& [k, _] : keys1) merged_keys.push_back(k);
+//   for (auto& [k, _] : keys2) merged_keys.push_back(k);
+//   std::sort(merged_keys.begin(), merged_keys.end());
+//   auto last = std::unique(merged_keys.begin(), merged_keys.end());
+//   merged_keys.erase(last, merged_keys.end());
+
+//   for (auto& key : merged_keys) {
+//     std::cout << key << std::endl;
+//   }
+  
+//   Trie* out = new Trie();
+//   for (const auto& key : merged_keys)
+//       out->add(key);
+//   out->build();
+//   return out;
+// }
+
+Trie* Trie::merge_trie(const Trie& t2) {
+  // Extract all keys from both tries
+  auto keys1 = this->enumerate_keys();
+  auto keys2 = t2.enumerate_keys();
+  
+  // std::cout << "Merging tries...\n";
+  // std::cout << "Trie 1: #keys = " << keys1.size() << ", #nodes = " << n_nodes() << ", size = " << size() << " bytes\n";
+  // std::cout << "Trie 2: #keys = " << keys2.size() << ", #nodes = " << t2.n_nodes() << ", size = " << t2.size() << " bytes\n";
+  
+  // Collect unique keys
+  std::vector<std::string> merged_keys;
+  merged_keys.reserve(keys1.size() + keys2.size());
+  
+  for (const auto& [key, _] : keys1) {
+    merged_keys.push_back(key);
+  }
+  for (const auto& [key, _] : keys2) {
+    merged_keys.push_back(key);
+  }
+  
+  // Sort and remove duplicates
+  std::sort(merged_keys.begin(), merged_keys.end());
+  auto last = std::unique(merged_keys.begin(), merged_keys.end());
+  merged_keys.erase(last, merged_keys.end());
+  
+  // Create a new trie with the merged keys
+  Trie* merged_trie = new Trie();
+  for (const auto& key : merged_keys) {
+    merged_trie->add(key);
+  }
+  merged_trie->build();
+  
+  return merged_trie;
+}
+
+std::vector<std::pair<std::string, int64_t>> Trie::enumerate_keys() const {
+  return impl_->enumerate_keys();
+}
+
 
 }  // namespace louds

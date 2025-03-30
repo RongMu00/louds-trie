@@ -3,6 +3,9 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
+#include <algorithm>
+#include <iostream>
 
 namespace louds {
 
@@ -29,6 +32,10 @@ class Trie {
   uint64_t n_nodes() const;
   // size returns the approximate size of assigned memory.
   uint64_t size() const;
+
+  Trie* merge_trie(const Trie& t2);
+
+  std::vector<std::pair<std::string, int64_t>> enumerate_keys() const;
 
  private:
   TrieImpl *impl_;
