@@ -92,7 +92,7 @@ int main(int argc, char * argv[]) {
 }
 
 void test_merged_trie(const vector<string>&keys1, const vector<string>&keys2) {
-  // Create two tries and add keys to them
+  // create two tries and add keys to them
   louds::Trie trie1, trie2;
   for(const auto& key : keys1) {
     trie1.add(key);
@@ -108,17 +108,17 @@ void test_merged_trie(const vector<string>&keys1, const vector<string>&keys2) {
 
   std::set<std::string> expected_keys;
     
-  // Add all keys from the first trie
+  // add all keys from the first trie
   for (const auto& key : keys1) {
     expected_keys.insert(key);
   }
   
-  // Add all keys from the second trie
+  // add all keys from the second trie
   for (const auto& key : keys2) {
     expected_keys.insert(key);
   }
 
-  // Merge the tries
+  // merge the tries
   louds::Trie* mergedTrie = trie1.merge_trie(trie2);
 
   printf("Merged Trie: #keys = %lu, #nodes = %lu, size = %lu bytes\n", mergedTrie->n_keys(), mergedTrie->n_nodes(), mergedTrie->size());

@@ -161,7 +161,7 @@ struct BitVector {
     #ifdef USE_PDEP_SELECT
     return (word_id * 64) + Ctz(_pdep_u64(1UL << i, words[word_id]));
     #else
-    // Fallback software version：find position of the (i+1)-th 1-bit in the word
+    // fallback software version：find position of the (i+1)-th 1-bit in the word
     uint64_t word = words[word_id];
     int count = 0;
     for (int bit = 0; bit < 64; ++bit) {
@@ -349,6 +349,7 @@ Trie* merge_louds_tries_level(const Trie& t1, const Trie& t2) {
           childMapping.level = parent.level + 1;
           childMapping.origins = std::get<2>(sortedChildren[i]);
           next_level_nodes.push_back(childMapping);
+          merged_impl->n_nodes_++;
         }
       // after all children for this parent, output a termination 1-bit
       merged_level.louds.add(1);
