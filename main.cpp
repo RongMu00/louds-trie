@@ -123,44 +123,8 @@ void test_merged_trie(const vector<string>&keys1, const vector<string>&keys2) {
 
   printf("Merged Trie: #keys = %lu, #nodes = %lu, size = %lu bytes\n", mergedTrie->n_keys(), mergedTrie->n_nodes(), mergedTrie->size());
 
-  // vector<string> all_keys = keys1;
-  // all_keys.insert(all_keys.end(), keys2.begin(), keys2.end());
-  // sort(all_keys.begin(), all_keys.end());
-  // all_keys.erase(unique(all_keys.begin(), all_keys.end()), all_keys.end());
-
-  // set<string> expected(all_keys.begin(), all_keys.end());
-
-  // auto merged_keys = mergedTrie->enumerate_keys();
-  // cout << "Merged keys:\n";
-  // for (const auto& [key, _] : merged_keys) {
-  //   cout << key << " ";
-  // }
-  // cout << endl;
-  // set<string> result_set;
-  // for (const auto& [key, _] : merged_keys) {
-  //   result_set.insert(key);
-  // }
-
-  // cout << "Expected keys:\n";
-  // for (const auto& key : expected_keys) {
-  //   cout << key << " ";
-  // }
-  // cout << endl;
-  // cout << "Result keys:\n";
-  // for (const auto& key : result_set) {
-  //   cout << key << " ";
-  // }
-  // cout << endl;
-
-  // assert(result_set == expected);
-  // cout << "Keys merged correctly.\n";
-
-  // for (const auto& key : expected) {
-  //   assert(mergedTrie->lookup(key) != -1);
-  // }
-  // cout << "Lookup after merge works.\n";
-
   auto merged_keys = mergedTrie->enumerate_keys();
+
   set<string> result_set;
   for (const auto& [key, _] : merged_keys) {
     result_set.insert(key);

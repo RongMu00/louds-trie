@@ -44,7 +44,7 @@ class Trie {
   std::vector<std::pair<std::string, int64_t>> enumerate_keys() const;
 
   // Get access to the implementation
-  const TrieImpl* get_impl() const { return impl_; }
+  TrieImpl* get_impl() const { return impl_; }
   void set_impl(TrieImpl* impl) { impl_ = impl; }
  private:
   TrieImpl *impl_;
