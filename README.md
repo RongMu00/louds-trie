@@ -1,6 +1,6 @@
 # louds-trie
 
-Merged two LOUDS-based tries by level to optimize the spatial efficiency, based on the LOUDS-trie implementation example (C++) from 
+Merged two LOUDS-based tries by level to optimize the spatial efficiency, based on the LOUDS-trie implementation example (C++): https://github.com/s-yata/louds-trie
 
 ## Results
 
