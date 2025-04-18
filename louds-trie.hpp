@@ -6,6 +6,11 @@
 #include <vector>
 #include <algorithm>
 #include <iostream>
+#include <map>
+#include <queue>
+#include <stack>
+#include <unordered_map>
+#include <set>
 
 namespace louds {
 
@@ -33,10 +38,14 @@ class Trie {
   // size returns the approximate size of assigned memory.
   uint64_t size() const;
 
+  Trie* merge_trie_naive(const Trie& t2);
   Trie* merge_trie(const Trie& t2);
 
   std::vector<std::pair<std::string, int64_t>> enumerate_keys() const;
 
+  // Get access to the implementation
+  TrieImpl* get_impl() const { return impl_; }
+  void set_impl(TrieImpl* impl) { impl_ = impl; }
  private:
   TrieImpl *impl_;
 };

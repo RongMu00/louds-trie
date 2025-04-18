@@ -161,7 +161,7 @@ struct BitVector {
     #ifdef USE_PDEP_SELECT
     return (word_id * 64) + Ctz(_pdep_u64(1UL << i, words[word_id]));
     #else
-    // Fallback software version：find position of the (i+1)-th 1-bit in the word
+    // fallback software version：find position of the (i+1)-th 1-bit in the word
     uint64_t word = words[word_id];
     int count = 0;
     for (int bit = 0; bit < 64; ++bit) {
@@ -209,6 +209,7 @@ class TrieImpl {
   void build();
   int64_t lookup(const string &query) const;
   std::vector<std::pair<std::string, int64_t>> enumerate_keys() const;
+  Trie* merge_trie(const Trie& t2);
 
   uint64_t n_keys() const {
     return n_keys_;
@@ -220,6 +221,8 @@ class TrieImpl {
     return size_;
   }
 
+  friend Trie* merge_louds_tries_level(const Trie& t1, const Trie& t2);
+
  private:
   vector<Level> levels_;
   uint64_t n_keys_;
@@ -227,6 +230,282 @@ class TrieImpl {
   uint64_t size_;
   string last_key_;
 };
+
+// merge by level
+Trie* merge_louds_tries_level(const Trie& t1, const Trie& t2) {
+  const TrieImpl* impl1 = t1.get_impl();
+  const TrieImpl* impl2 = t2.get_impl();
+  TrieImpl* merged_impl = new TrieImpl();
+  Trie* merged_trie = new Trie();
+  delete merged_trie->get_impl();
+  merged_trie->set_impl(merged_impl);
+
+  // reset level 0
+  merged_impl->levels_.clear();
+  merged_impl->levels_.resize(2);
+  merged_impl->levels_[0].louds = BitVector();
+  merged_impl->levels_[0].outs  = BitVector();
+  merged_impl->levels_[0].labels.clear();
+  merged_impl->levels_[0].louds.add(0);
+  merged_impl->levels_[0].louds.add(1);
+  merged_impl->levels_[0].outs.add(0);
+  merged_impl->levels_[0].labels.push_back(' ');
+
+  // determine maximum depth from both tries
+  size_t max_depth = std::max(impl1->levels_.size(), impl2->levels_.size());
+  if (merged_impl->levels_.size() < max_depth)
+    merged_impl->levels_.resize(max_depth);
+
+  // define a NodeMapping that carries (merged_id, level, and input origins)
+  struct NodeMapping {
+      uint64_t merged_id;
+      std::vector<std::pair<int, uint64_t>> origins; // (trie idx, original node id)
+      uint64_t level;
+  };
+
+  // initialize BFS with the merged root for level 0
+  std::vector<NodeMapping> current_level_nodes;
+  current_level_nodes.push_back({0, {{1, 0}, {2, 0}}, 0});
+  merged_impl->n_nodes_ = 1;
+  merged_impl->n_keys_  = 0;
+  uint64_t global_id = 1;  // next merged node id
+
+  // process level 0 to max_depth-2
+  for(size_t level=0; level < max_depth-1; ++level){
+    if (merged_impl->levels_.size() <= level + 1)
+      merged_impl->levels_.resize(level + 2);
+
+    Level& merged_level = merged_impl->levels_[level + 1];
+
+    // reset merged level data
+    merged_level.louds = BitVector();
+    merged_level.outs  = BitVector();
+    merged_level.labels.clear();
+    std::vector<NodeMapping> next_level_nodes;
+
+    // process each parent in current_level_nodes separately
+    for (const auto& parent: current_level_nodes) {
+      // for this parent, aggregate children from all its parent origins
+      std::map<char, std::pair<bool, std::vector<std::pair<int, uint64_t>>>> childrenMap;
+      for (const auto& origin: parent.origins) {
+        int trie_idx = origin.first;
+        uint64_t orig_id = origin.second;
+        const TrieImpl* impl = (trie_idx == 1) ? impl1 : impl2;
+        if (parent.level + 1 >= impl->levels_.size()) continue;
+        const Level &input_level = impl->levels_[parent.level + 1];
+
+        uint64_t node_pos = 0, base_node_id = 0;
+        if (orig_id != 0) {
+          node_pos = input_level.louds.select(orig_id - 1) + 1;
+          base_node_id = node_pos - orig_id;
+        } else {
+          node_pos = 0;
+          base_node_id = 0;
+        }
+
+        // traverse children for this origin until a termination (1-bit) is found
+        for (uint64_t pos = node_pos; pos < input_level.louds.n_bits; ++pos) {
+          if (input_level.louds.get(pos)) break;
+
+          uint64_t child_id = pos - node_pos + base_node_id;
+          // check if child_id is within bounds
+          if (child_id >= input_level.labels.size()) continue;
+
+          char label = input_level.labels[child_id];
+          bool is_terminal = input_level.outs.get(child_id);
+          // aggregate children by label and add to map
+          auto &entry = childrenMap[label];
+          entry.first = entry.first || is_terminal;
+          entry.second.push_back({trie_idx, child_id});
+        }
+      }
+      
+      // output its children for this parent
+      // for a parent's children list, output 0-bit for each child then terminated by 1
+      if (childrenMap.empty()) { // no children: output 1-bit.
+        merged_level.louds.add(1);
+      } else { // convert the map to a sorted vector by label
+        std::vector<std::tuple<char, bool, std::vector<std::pair<int, uint64_t>>>> sortedChildren;
+        for (auto &p : childrenMap) {
+          sortedChildren.push_back({p.first, p.second.first, p.second.second});
+        }
+
+        std::sort(sortedChildren.begin(), sortedChildren.end(), [](auto &a, auto &b) { 
+          return std::get<0>(a) < std::get<0>(b); 
+        });
+
+        // for each child, output a 0-bit, record its label and terminal flag
+        for (size_t i = 0; i < sortedChildren.size(); ++i) {
+          merged_level.louds.add(0);
+          char label = std::get<0>(sortedChildren[i]);
+          merged_level.labels.push_back(label);
+          bool is_terminal = std::get<1>(sortedChildren[i]);
+          merged_level.outs.add(is_terminal);
+          if (is_terminal) merged_impl->n_keys_++;
+          
+          // create a new NodeMapping for this child
+          NodeMapping childMapping;
+          childMapping.merged_id = global_id++;
+          childMapping.level = parent.level + 1;
+          childMapping.origins = std::get<2>(sortedChildren[i]);
+          next_level_nodes.push_back(childMapping);
+          merged_impl->n_nodes_++;
+        }
+      // after all children for this parent, output a termination 1-bit
+      merged_level.louds.add(1);
+      }
+    }
+    
+    // update current level nodes for next iteration
+    current_level_nodes = next_level_nodes;
+  }
+
+  // set last key
+  std::set<std::string> all_keys;
+  for (const auto& [key, _] : t1.enumerate_keys()) all_keys.insert(key);
+  for (const auto& [key, _] : t2.enumerate_keys()) all_keys.insert(key);
+  if (!all_keys.empty())
+    merged_impl->last_key_ = *all_keys.rbegin();
+
+  // trim trailing empty levels
+  while (!merged_impl->levels_.empty()) {
+    const auto& lvl = merged_impl->levels_.back();
+    if (lvl.louds.n_bits <= 1 && lvl.labels.empty())
+      merged_impl->levels_.pop_back();
+    else break;
+  }
+
+  // reset offsets
+  for (size_t i = 0; i < merged_impl->levels_.size(); ++i)
+    merged_impl->levels_[i].offset = 0;
+
+  // build
+  merged_impl->build();
+
+  return merged_trie;
+}
+
+// build a trie structure from all unique keys and convert to louds format and traverse by level 
+// Trie* merge_louds_tries_level_v1(const Trie& t1, const Trie& t2) {
+//   const TrieImpl* impl1 = t1.get_impl();
+//   const TrieImpl* impl2 = t2.get_impl();
+
+//   // Extract all expected keys for verification
+//   std::set<std::string> expected_keys;
+//   auto keys1 = t1.enumerate_keys();
+//   auto keys2 = t2.enumerate_keys();
+//   for (const auto& [key, _] : keys1) expected_keys.insert(key);
+//   for (const auto& [key, _] : keys2) expected_keys.insert(key);
+  
+//   std::cout << "Total unique keys from both tries: " << expected_keys.size() << std::endl;
+
+//   // create a new trie
+//   TrieImpl* merged_impl = new TrieImpl();
+//   Trie* merged_trie = new Trie();
+
+//   delete merged_trie->get_impl();
+//   merged_trie->set_impl(merged_impl);
+
+//   // build in-memory trie from all keys 
+//   struct TrieNode {
+//     std::map<char, TrieNode*> children;
+//     bool is_terminal;
+    
+//     TrieNode() : children(), is_terminal(false) {}
+//     ~TrieNode() {
+//       for (auto& [_, child] : children) {
+//         delete child;
+//       }
+//     }
+//   };
+
+//   TrieNode* root = new TrieNode();
+//   for (const auto& key : expected_keys) {
+//     TrieNode* node = root;
+//     for (char c : key) {
+//       if (node->children.find(c) == node->children.end()) {
+//         node->children[c] = new TrieNode();
+//       }
+//       node = node->children[c];
+//     }
+//     node->is_terminal = true;
+//   }
+
+//   // Initialize merged structure
+//   merged_impl->levels_.clear();
+//   merged_impl->levels_.resize(2);  // Start with levels 0 and 1
+//   merged_impl->n_nodes_ = 1;  // Root node
+//   merged_impl->n_keys_ = 0;
+  
+//   // initialize root level (level 0)
+//   merged_impl->levels_[0].louds.add(0);
+//   merged_impl->levels_[0].louds.add(1);
+//   merged_impl->levels_[0].outs.add(0);
+//   merged_impl->levels_[0].labels.push_back(' ');
+  
+//   // initialize level 1
+//   merged_impl->levels_[1].louds.add(1);
+  
+//   // convert in-memory trie to LOUDS format with BFS traversal
+//   std::vector<std::pair<TrieNode*, uint64_t>> current_level;
+//   current_level.push_back({root, 0});  // (node, level)
+  
+//   for (uint64_t level = 0; !current_level.empty(); level++) {
+//     std::vector<std::pair<TrieNode*, uint64_t>> next_level;
+    
+//     // ensure we have enough levels
+//     if (level + 1 >= merged_impl->levels_.size()) {
+//       merged_impl->levels_.resize(level + 2);
+//     }
+    
+//     Level& current_level_struct = merged_impl->levels_[level + 1];
+    
+//     for (auto& [node, _] : current_level) {
+//       std::vector<std::pair<char, TrieNode*>> sorted_children(node->children.begin(), node->children.end());
+//       // add children to LOUDS structure
+//       for (auto& [label, child] : sorted_children) {
+//         // add 0-bit for this child
+//         current_level_struct.louds.add(0);
+//         // record terminal status
+//         current_level_struct.outs.add(child->is_terminal ? 1 : 0);
+//         // add label
+//         current_level_struct.labels.push_back(label);
+//         // count terminal nodes
+//         if (child->is_terminal) {
+//           merged_impl->n_keys_++;
+//         }
+//         // add to node count
+//         merged_impl->n_nodes_++;
+//         // queue for next level
+//         next_level.push_back({child, level + 1});
+//       }
+      
+//       // add 1-bit to mark end of children list
+//       current_level_struct.louds.add(1);
+//     }
+    
+//     std::cout << "Level " << (level + 1) << ": "
+//               << "louds bits = " << current_level_struct.louds.n_bits
+//               << ", outs = " << current_level_struct.outs.n_bits
+//               << ", labels = " << current_level_struct.labels.size()
+//               << std::endl;
+    
+//     current_level = next_level;
+//   }
+  
+//   // clean up
+//   delete root;
+  
+//   // set last key
+//   if (!expected_keys.empty()) {
+//     merged_impl->last_key_ = *expected_keys.rbegin();
+//   }
+  
+//   // build
+//   merged_impl->build();
+  
+//   return merged_trie;
+// }
 
 TrieImpl::TrieImpl()
   : levels_(2), n_keys_(0), n_nodes_(1), size_(0), last_key_() {
@@ -353,105 +632,78 @@ int64_t TrieImpl::lookup(const string &query) const {
   return level.offset + level.outs.rank(node_id);
 }
 
-// std::vector<std::pair<std::string, int64_t>> TrieImpl::enumerate_keys() const {
-//   std::vector<std::pair<std::string, int64_t>> results;
-
-//   struct Frame {
-//     int level;
-//     uint64_t node_id;
-//     std::string prefix;
-//   };
-
-//   cout << "TrieImpl::enumerate_keys() called\n";
-
-//   std::vector<Frame> stack;
-//   stack.push_back({0, 0, ""});  // start from root
-
-//   while (!stack.empty()) {
-//     Frame cur = stack.back();
-//     stack.pop_back();
-
-//     if (static_cast<size_t>(cur.level + 1) >= levels_.size()) continue;
-//     const auto& level = levels_[cur.level + 1];
-
-//     uint64_t node_pos;
-//     if (cur.node_id != 0)
-//       node_pos = level.louds.select(cur.node_id - 1) + 1;
-//     else
-//       node_pos = 0;
-
-//     uint64_t end = node_pos;
-//     uint64_t word = level.louds.words[end / 64] >> (end % 64);
-//     if (word == 0) {
-//       end += 64 - (end % 64);
-//       word = level.louds.words[end / 64];
-//       while (word == 0) {
-//         end += 64;
-//         word = level.louds.words[end / 64];
-//       }
-//     }
-//     end += __builtin_ctzll(word);
-//     uint64_t begin = cur.node_id;
-//     end = begin + end - node_pos;
-
-//     for (uint64_t child = begin; child < end; ++child) {
-//       std::string next_prefix = cur.prefix + (char)level.labels[child];
-//       if (level.outs.get(child)) {
-//         int64_t key_id = level.offset + level.outs.rank(child);
-//         results.emplace_back(next_prefix, key_id);
-//       }
-//       stack.push_back({cur.level + 1, child, next_prefix});
-//     }
-//   }
-
-//   cout << "TrieImpl::enumerate_keys() finished\n";
-
-//   std::sort(results.begin(), results.end());
-//   return results;
-// }
 
 std::vector<std::pair<std::string, int64_t>> TrieImpl::enumerate_keys() const {
   std::vector<std::pair<std::string, int64_t>> results;
   
-  // Use DFS to traverse the trie and collect all keys
+  // early exit for empty tries
+  if (n_keys_ == 0) {
+    return results;
+  }
+  
+  // check if the root is terminal (empty string)
+  if (levels_[0].outs.get(0)) {
+    results.emplace_back("", levels_[0].offset);
+  }
+  
+  // stack for DFS traversal: (level, node_id, prefix)
   std::vector<std::tuple<uint64_t, uint64_t, std::string>> stack;
-  stack.push_back({0, 0, ""}); // (level, node_id, prefix)
+  stack.push_back(std::make_tuple(0, 0, ""));
   
   while (!stack.empty()) {
-    auto [level, node_id, prefix] = stack.back();
+    uint64_t level, node_id;
+    std::string prefix;
+    std::tie(level, node_id, prefix) = stack.back();
     stack.pop_back();
     
-    // Check if this node marks the end of a key
-    if (level > 0 && levels_[level].outs.get(node_id)) {
-      int64_t key_id = levels_[level].offset + levels_[level].outs.rank(node_id);
-      results.emplace_back(prefix, key_id);
-    }
-    
-    // Skip if we've reached the max level
+    // skip if we've reached max depth
     if (level + 1 >= levels_.size()) continue;
     
-    const Level& next_level = levels_[level + 1];
-    uint64_t node_pos;
+    const auto& next_level = levels_[level + 1];
+    
+    // find position of children in the next level
+    uint64_t node_pos, base_id;
     if (node_id != 0) {
-      node_pos = next_level.louds.select(node_id - 1) + 1;
-      node_id = node_pos - node_id;
+      // check if this node has any children (if node_id-1 is within range of 1-bits)
+      if (node_id - 1 < next_level.louds.rank(next_level.louds.n_bits)) {
+        node_pos = next_level.louds.select(node_id - 1) + 1;
+        base_id = node_pos - node_id;
+      } else {
+        continue; // no children
+      }
     } else {
       node_pos = 0;
+      base_id = 0;
     }
     
-    // Find all children
+    // process all children of this node
     for (uint64_t pos = node_pos; pos < next_level.louds.n_bits; ++pos) {
-      if (next_level.louds.get(pos)) break;
+      if (next_level.louds.get(pos)) {
+        // End of children list
+        break;
+      }
       
-      uint64_t child_id = pos - node_pos + node_id;
+      uint64_t child_id = pos - node_pos + base_id;
+      
       if (child_id < next_level.labels.size()) {
         char label = next_level.labels[child_id];
-        stack.push_back({level + 1, child_id, prefix + label});
+        std::string new_prefix = prefix + label;
+        
+        // check if terminal
+        if (next_level.outs.get(child_id)) {
+          int64_t key_id = next_level.offset + next_level.outs.rank(child_id);
+          results.emplace_back(new_prefix, key_id);
+        }
+        
+        // continue traversal
+        stack.push_back(std::make_tuple(level + 1, child_id, new_prefix));
       }
     }
   }
   
+  // sort results for consistent ordering
   std::sort(results.begin(), results.end());
+  
   return results;
 }
 
@@ -485,39 +737,7 @@ uint64_t Trie::size() const {
   return impl_->size();
 }
 
-// Trie* Trie::merge_trie(const Trie& t2) {
-//   auto keys1 = this->enumerate_keys();
-//   auto keys2 = t2.enumerate_keys();
-
-//   std::cout << "start merge_trie\n";
-//   std::cout << "Trie 1: #keys = " << keys1.size() << ", #nodes = " << n_nodes() << ", size = " << size() << " bytes\n";
-//   std::cout << "Trie 2: #keys = " << keys2.size() << ", #nodes = " << t2.n_nodes() << ", size = " << t2.size() << " bytes\n";
-
-//   vector<string> merged_keys;
-//   // for (const auto& key : keys1) {
-//   //   merged_keys.push_back(key.first);
-//   // }
-//   // for (const auto& key : keys2) {
-//   //   merged_keys.push_back(key.first);
-//   // }
-//   for (auto& [k, _] : keys1) merged_keys.push_back(k);
-//   for (auto& [k, _] : keys2) merged_keys.push_back(k);
-//   std::sort(merged_keys.begin(), merged_keys.end());
-//   auto last = std::unique(merged_keys.begin(), merged_keys.end());
-//   merged_keys.erase(last, merged_keys.end());
-
-//   for (auto& key : merged_keys) {
-//     std::cout << key << std::endl;
-//   }
-  
-//   Trie* out = new Trie();
-//   for (const auto& key : merged_keys)
-//       out->add(key);
-//   out->build();
-//   return out;
-// }
-
-Trie* Trie::merge_trie(const Trie& t2) {
+Trie* Trie::merge_trie_naive(const Trie& t2) {
   // Extract all keys from both tries
   auto keys1 = this->enumerate_keys();
   auto keys2 = t2.enumerate_keys();
@@ -550,6 +770,12 @@ Trie* Trie::merge_trie(const Trie& t2) {
   merged_trie->build();
   
   return merged_trie;
+}
+
+
+// Update Trie::merge_trie to use this function
+Trie* Trie::merge_trie(const Trie& t2) {
+  return merge_louds_tries_level(*this, t2);
 }
 
 std::vector<std::pair<std::string, int64_t>> Trie::enumerate_keys() const {
